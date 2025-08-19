@@ -269,16 +269,26 @@ app.get('/api/room/:token/stats', (req, res) => {
 app.get('/api/room/:token/messages', async (req, res) => {
   const { token } = req.params;
   
+  console.log(`📜 History request for room: ${token}`);
+  
   if (!isValidRoomToken(token)) {
+    console.log(`📜 Invalid room token: ${token}`);
     return res.status(400).json({ error: 'Invalid room token' });
   }
 
-  if (!redisConnected) {
-    return res.json({ messages: [] }); 
+  if (!redisConnected || !redis.isReady) {
+    console.log('📜 Redis not available, returning empty messages');
+    return res.json({ 
+      messages: [],
+      note: 'Redis not available - no message history'
+    });
   }
 
   try {
+    console.log(`📜 Searching for messages with pattern: message:${token}:*`);
     const messageKeys = await redis.keys(`message:${token}:*`);
+    console.log(`📜 Found ${messageKeys.length} message keys`);
+    
     const messages = [];
     
     for (const key of messageKeys) {
@@ -290,24 +300,35 @@ app.get('/api/room/:token/messages', async (req, res) => {
           const messageTime = new Date(parsedMessage.timestamp).getTime();
           const now = Date.now();
           const ttlMs = parsedMessage.ttl * 1000;
-          
+
           if (parsedMessage.ttl === 0 || (messageTime + ttlMs) > now) {
             messages.push(parsedMessage);
+            console.log(`📜 Added message ${parsedMessage.id} to history`);
+          } else {
+            console.log(`📜 Message ${parsedMessage.id} expired, skipping`);
+            await redis.del(key);
           }
         }
       } catch (parseError) {
-        console.warn('Failed to parse message:', key, parseError.message);
+        console.warn(`📜 Failed to parse message ${key}:`, parseError.message);
       }
     }
-
+    
     messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     
-    console.log(`📜 Retrieved ${messages.length} messages for room ${token}`);
-    res.json({ messages });
+    console.log(`📜 Returning ${messages.length} messages for room ${token}`);
+    res.json({ 
+      messages,
+      count: messages.length,
+      timestamp: new Date().toISOString()
+    });
     
   } catch (error) {
-    console.error('Error retrieving messages:', error);
-    res.status(500).json({ error: 'Failed to retrieve messages' });
+    console.error('📜 Error retrieving messages:', error);
+    res.status(500).json({ 
+      error: 'Failed to retrieve messages',
+      details: error.message
+    });
   }
 });
 
