@@ -3,10 +3,19 @@ const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const { createClient } = require('redis');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+
+const uploadsDir = path.join(__dirname, '../uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('📁 Created uploads directory:', uploadsDir);
+}
 
 const redis = createClient({
   username: process.env.REDIS_USERNAME || 'default',
@@ -18,6 +27,51 @@ const redis = createClient({
     connectTimeout: 10000
   }
 });
+
+const multer = require('multer');
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|webp/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only JPEG, PNG, GIF, and WebP are allowed.'));
+    }
+  }
+});
+
+const generateSecureFilename = (originalName, messageId) => {
+  const ext = path.extname(originalName).toLowerCase();
+  const timestamp = Date.now();
+  const random = crypto.randomBytes(8).toString('hex');
+  return `${messageId}_${timestamp}_${random}${ext}`;
+};
+
+const scheduleFileDeletion = (filePath, ttl) => {
+  if (ttl === 0) {
+    setTimeout(() => {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        console.log(`🔥 Burn-after-reading: Deleted ${path.basename(filePath)}`);
+      }
+    }, 30000);
+  } else {
+    setTimeout(() => {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        console.log(`⏰ TTL expired: Deleted ${path.basename(filePath)}`);
+      }
+    }, ttl * 1000);
+  }
+};
 
 redis.on('error', (err) => {
   console.error('Redis Client Error:', err.message);
@@ -134,65 +188,156 @@ io.on('connection', (socket) => {
     }
   });
 
-    socket.on('send-message', async (data) => {
-    const { roomToken, message, sender, ttl = 86400 } = data;
-    
-    console.log('📥 Received message data:', { roomToken, sender, messageLength: message?.length, ttl });
-    
-    if (!roomToken || !message || !sender) {
-      console.error('❌ Missing required message data:', { roomToken: !!roomToken, message: !!message, sender: !!sender });
-      socket.emit('error', { message: 'Missing required message data' });
-      return;
-    }
-
-    try {
-      const messageId = generateMessageId();
-      const timestamp = new Date().toISOString();
-      
-      const messageData = {
-        id: messageId,
-        message: message,
-        sender,
-        timestamp,
-        ttl: parseInt(ttl),
-        roomToken
-      };
-      
-      console.log('📤 Broadcasting message to room:', roomToken, 'Message ID:', messageId);
-
-      if (messageData.ttl > 0 && redis.isReady) {
-        try {
-          const redisKey = `message:${roomToken}:${messageId}`;
-          await redis.setEx(redisKey, messageData.ttl, JSON.stringify(messageData));
-          console.log(`💾 Message stored in Redis with TTL ${messageData.ttl}s`);
-        } catch (redisError) {
-          console.warn('⚠️ Redis storage failed, continuing without persistence:', redisError.message);
-        }
-      }
-
-      const roomSockets = await io.in(roomToken).fetchSockets();
-      console.log(`📢 Broadcasting to ${roomSockets.length} sockets in room ${roomToken}`);
-      
-      io.to(roomToken).emit('new-message', messageData);
-
-      if (activeRooms.has(roomToken)) {
-        activeRooms.get(roomToken).messageCount++;
-      }
-      
-      if (messageData.ttl === 0) {
-        setTimeout(() => {
-          console.log('🔥 Auto-deleting burn-after-reading message:', messageId);
-          io.to(roomToken).emit('message-expired', { messageId });
-        }, 2000); 
-      }
-      
-      console.log(`✅ Message sent in room ${roomToken} by ${sender} (TTL: ${messageData.ttl}s)`);
-      
-    } catch (error) {
-      console.error('❌ Error sending message:', error);
-      socket.emit('error', { message: 'Failed to send message' });
-    }
+  socket.on('send-message', async (data) => {
+  const { roomToken, message, sender, ttl = 86400 } = data;
+  
+  console.log('📝 Received text message:', { 
+    roomToken, 
+    sender, 
+    messageLength: message?.length, 
+    ttl 
   });
+  
+  if (!roomToken || !message || !sender) {
+    console.error('❌ Missing required message data');
+    socket.emit('error', { message: 'Missing required message data' });
+    return;
+  }
+
+  try {
+    const messageId = generateMessageId();
+    const timestamp = new Date().toISOString();
+    
+    const messageData = {
+      id: messageId,
+      type: 'text', 
+      message: message,
+      sender,
+      timestamp,
+      ttl: parseInt(ttl),
+      roomToken
+    };
+    
+    console.log('📤 Broadcasting text message to room:', roomToken, 'Message ID:', messageId);
+
+    if (messageData.ttl > 0 && redis.isReady) {
+      try {
+        const redisKey = `message:${roomToken}:${messageId}`;
+        await redis.setEx(redisKey, messageData.ttl, JSON.stringify(messageData));
+        console.log(`💾 Text message stored in Redis with TTL ${messageData.ttl}s`);
+      } catch (redisError) {
+        console.warn('⚠️ Redis storage failed for message, continuing without persistence:', redisError.message);
+      }
+    }
+
+    const roomSockets = await io.in(roomToken).fetchSockets();
+    console.log(`📢 Broadcasting text message to ${roomSockets.length} sockets in room ${roomToken}`);
+    
+    io.to(roomToken).emit('new-message', messageData);
+
+    if (activeRooms.has(roomToken)) {
+      activeRooms.get(roomToken).messageCount++;
+    }
+    
+    if (messageData.ttl === 0) {
+      setTimeout(() => {
+        console.log('🔥 Auto-deleting burn-after-reading message:', messageId);
+        io.to(roomToken).emit('message-expired', { messageId });
+      }, 2000);
+    }
+    
+    console.log(`✅ Text message sent in room ${roomToken} by ${sender} (TTL: ${messageData.ttl}s)`);
+    
+  } catch (error) {
+    console.error('❌ Error sending text message:', error);
+    socket.emit('error', { message: 'Failed to send message' });
+  }
+});
+
+  socket.on('send-image', async (data) => {
+  const { roomToken, imageData, sender, ttl = 86400, caption = "" } = data;
+  
+  console.log('📸 Received image data:', { 
+    roomToken, 
+    sender, 
+    imageSize: imageData?.size, 
+    ttl,
+    hasCaption: !!caption 
+  });
+  
+  if (!roomToken || !imageData || !sender) {
+    console.error('❌ Missing required image data');
+    socket.emit('error', { message: 'Missing required image data' });
+    return;
+  }
+
+  try {
+    const messageId = generateMessageId();
+    const timestamp = new Date().toISOString();
+    
+    const filename = generateSecureFilename(imageData.name, messageId);
+    const filePath = path.join(uploadsDir, filename);
+
+    const base64Data = imageData.data.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    fs.writeFileSync(filePath, buffer);
+
+    scheduleFileDeletion(filePath, ttl);
+    
+    const messageData = {
+      id: messageId,
+      type: 'image',
+      imageData: {
+        id: imageData.id,
+        name: imageData.name,
+        filename: filename,
+        imageUrl: `/api/image/${filename}`,
+        size: imageData.size,
+        mimeType: imageData.mimeType,
+        dimensions: imageData.dimensions
+      },
+      caption: caption || "",
+      sender,
+      timestamp,
+      ttl: parseInt(ttl),
+      roomToken
+    };
+    
+    console.log('📤 Broadcasting image to room:', roomToken, 'Message ID:', messageId);
+
+    if (messageData.ttl > 0 && redis.isReady) {
+      try {
+        const metadataOnly = {
+          ...messageData,
+          imageData: {
+            ...messageData.imageData,
+            data: undefined
+          }
+        };
+        const redisKey = `message:${roomToken}:${messageId}`;
+        await redis.setEx(redisKey, messageData.ttl, JSON.stringify(metadataOnly));
+        console.log(`💾 Image metadata stored in Redis (TTL: ${messageData.ttl}s)`);
+      } catch (redisError) {
+        console.warn('⚠️ Redis storage failed, continuing without persistence:', redisError.message);
+      }
+    }
+
+    const roomSockets = await io.in(roomToken).fetchSockets();
+    console.log(`📢 Broadcasting image to ${roomSockets.length} sockets in room ${roomToken}`);
+    
+    io.to(roomToken).emit('new-message', messageData);
+
+    if (activeRooms.has(roomToken)) {
+      activeRooms.get(roomToken).messageCount++;
+    }
+    
+    console.log(`✅ Image sent in room ${roomToken} by ${sender} (TTL: ${messageData.ttl}s)`);
+    
+  } catch (error) {
+    console.error('❌ Error sending image:', error);
+    socket.emit('error', { message: 'Failed to send image' });
+  }
+});
 
   socket.on('disconnect', () => {
     console.log(`Client disconnected: ${socket.id}`);
@@ -332,6 +477,98 @@ app.get('/api/room/:token/messages', async (req, res) => {
   }
 });
 
+app.delete('/api/image/:imageId', async (req, res) => {
+  const { imageId } = req.params;
+  
+  if (!redisConnected || !redis.isReady) {
+    return res.status(503).json({ error: 'Redis not available' });
+  }
+
+  try {
+    const keys = await redis.keys(`message:*`);
+    let deleted = false;
+    
+    for (const key of keys) {
+      try {
+        const messageData = await redis.get(key);
+        if (messageData) {
+          const parsedMessage = JSON.parse(messageData);
+          if (parsedMessage.type === 'image' && parsedMessage.imageData?.id === imageId) {
+            await redis.del(key);
+            deleted = true;
+            console.log(`🗑️ Deleted image message: ${parsedMessage.id}`);
+            break;
+          }
+        }
+      } catch (parseError) {
+        console.warn('Failed to parse message during image cleanup:', parseError.message);
+      }
+    }
+    
+    res.json({ success: deleted, imageId });
+  } catch (error) {
+    console.error('Error deleting image:', error);
+    res.status(500).json({ error: 'Failed to delete image' });
+  }
+});
+
+app.post('/api/upload-image', upload.single('image'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    const messageId = req.body.messageId || `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const ttl = parseInt(req.body.ttl) || 86400;
+    
+    const filename = generateSecureFilename(req.file.originalname, messageId);
+    const filePath = path.join(uploadsDir, filename);
+    
+    fs.writeFileSync(filePath, req.file.buffer);
+    
+    scheduleFileDeletion(filePath, ttl);
+    
+    const imageUrl = `/api/image/${filename}`;
+    
+    console.log(`📁 Image saved: ${filename} (TTL: ${ttl}s)`);
+    
+    res.json({
+      success: true,
+      imageId: messageId,
+      filename: filename,
+      imageUrl: imageUrl,
+      size: req.file.size,
+      mimeType: req.file.mimetype
+    });
+    
+  } catch (error) {
+    console.error('Error uploading image:', error);
+    res.status(500).json({ error: 'Failed to upload image' });
+  }
+});
+
+app.get('/api/image/:filename', (req, res) => {
+  const { filename } = req.params;
+  const filePath = path.join(uploadsDir, filename);
+  
+  if (fs.existsSync(filePath)) {
+    const ext = path.extname(filename).toLowerCase();
+    const mimeTypes = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp'
+    };
+    
+    res.setHeader('Content-Type', mimeTypes[ext] || 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=3600'); 
+    res.sendFile(filePath);
+  } else {
+    res.status(404).json({ error: 'Image not found or expired' });
+  }
+});
+
 app.get('/api/redis/test', async (req, res) => {
   if (!redisConnected) {
     return res.status(503).json({
@@ -360,26 +597,30 @@ app.get('/api/redis/test', async (req, res) => {
   }
 });
 
-setInterval(async () => {
-  if (!redisConnected) return;
-  
+setInterval(() => {
   try {
-    const keys = await redis.keys('message:*');
-    let expiredCount = 0;
+    if (!fs.existsSync(uploadsDir)) return;
     
-    for (const key of keys) {
-      const ttl = await redis.ttl(key);
-      if (ttl <= 0) {
-        await redis.del(key);
-        expiredCount++;
+    const files = fs.readdirSync(uploadsDir);
+    let cleanedCount = 0;
+    
+    files.forEach(file => {
+      const filePath = path.join(uploadsDir, file);
+      const stats = fs.statSync(filePath);
+      const ageInHours = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60);
+      
+      if (ageInHours > 25) {
+        fs.unlinkSync(filePath);
+        cleanedCount++;
+        console.log(`🧹 Cleaned up old file: ${file}`);
       }
-    }
+    });
     
-    if (expiredCount > 0) {
-      console.log(`Cleaned up ${expiredCount} expired messages`);
+    if (cleanedCount > 0) {
+      console.log(`🧹 Cleanup completed: ${cleanedCount} files removed`);
     }
   } catch (error) {
-    console.error('Error during cleanup:', error);
+    console.error('Error during file cleanup:', error);
   }
 }, 3600000); 
 

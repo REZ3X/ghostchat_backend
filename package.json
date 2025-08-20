@@ -7,16 +7,22 @@
     "start": "node src/app.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["chat", "encryption", "ephemeral", "anonymous"],
+  "keywords": [
+    "chat",
+    "encryption",
+    "ephemeral",
+    "anonymous"
+  ],
   "author": "",
   "license": "ISC",
   "description": "GhostChat Backend - Anonymous encrypted ephemeral messaging",
   "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.7.5",
     "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "multer": "^2.0.2",
     "redis": "^4.6.12",
-    "dotenv": "^16.3.1"
+    "socket.io": "^4.7.5"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
